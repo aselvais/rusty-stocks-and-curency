@@ -1,9 +1,9 @@
 //! Frankfurter.dev data source: historical currency exchange rates.
 //!
-//! Endpoints (no API key required):
-//! * `v1/currencies` – a map of ISO code to currency name.
-//! * `v1/{base}/{target}` – a rate time series for a currency pair over a date
-//!   range (`from`/`to` query parameters, ISO dates).
+//! Endpoints (no API key required, current API v2 — v1 is now frozen):
+//! * `v2/currencies` – a list of `{ iso_code, name }` currency records.
+//! * `v2/rates`      – a rate time series for one base and one (or many) quote
+//!   currencies over a date range (`from`/`to` query parameters, ISO dates).
 //!
 //! The rate for a pair is modelled as a price series where the "close" (and the
 //! other OHLC fields, plus adjusted close) all equal the daily rate. This lets
@@ -16,8 +16,8 @@ use serde::Deserialize;
 use super::Client;
 use crate::models::PricePoint;
 
-const BASE_URL: &str = "https://api.frankfurter.dev/v1";
-const CURRENCIES_URL: &str = "https://api.frankfurter.dev/v1/currencies";
+const RATES_URL: &str = "https://api.frankfurter.dev/v2/rates";
+const CURRENCIES_URL: &str = "https://api.frankfurter.dev/v2/currencies";
 
 /// List all currency codes the service knows about, as `(code, name)` pairs
 /// sorted by code.
@@ -29,9 +29,12 @@ pub fn available_currencies(client: &Client) -> Result<Vec<(String, String)>> {
     if !status.is_success() {
         return Err(anyhow!("Frankfurter returned HTTP {status} for currencies list"));
     }
-    let map: std::collections::BTreeMap<String, String> =
+    let list: Vec<CurrencyInfo> =
         resp.json().context("failed to parse Frankfurter currencies response")?;
-    Ok(map.into_iter().collect())
+    let mut out: Vec<(String, String)> =
+        list.into_iter().map(|c| (c.iso_code, c.name)).filter(|(code, _)| !code.is_empty()).collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
 }
 
 /// Fetch the daily `base`-to-`target` rate series over `[from, to]`.
@@ -48,32 +51,34 @@ pub fn convert(
 ) -> Result<Vec<PricePoint>> {
     let from = from.to_string();
     let to = to.to_string();
-    let url = format!("{BASE_URL}/{}/{}/?from={from}&to={to}", urlencoded(base), urlencoded(target));
+    let url = format!(
+        "{RATES_URL}?base={}&quotes={}&from={from}&to={to}",
+        urlencoded(base),
+        urlencoded(target)
+    );
     let resp = client.get(&url).with_context(|| format!("convert request failed: {url}"))?;
     let status = resp.status();
     if !status.is_success() {
         return Err(anyhow!("Frankfurter returned HTTP {status} for {base}->{target}"));
     }
-    let body: ConvertResponse = resp.json().context("failed to parse Frankfurter response")?;
+    // v2 `/rates` returns a top-level JSON array of `{ date, base, quote, rate }`.
+    let rows: Vec<RateEntry> = resp.json().context("failed to parse Frankfurter response")?;
 
-    let mut points: Vec<PricePoint> = body
-        .timeseries
+    let mut points: Vec<PricePoint> = rows
         .into_iter()
-        .map(|(date_str, rate)| {
-            let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").ok()?;
+        .map(|r| {
+            let date = NaiveDate::parse_from_str(&r.date, "%Y-%m-%d").ok()?;
             Some(PricePoint {
                 asset_id: 0,
                 date,
-                open: rate,
-                high: rate,
-                low: rate,
-                close: rate,
-                adj_close: rate,
+                open: r.rate,
+                high: r.rate,
+                low: r.rate,
+                close: r.rate,
+                adj_close: r.rate,
                 volume: 0,
             })
         })
-        .collect::<Vec<_>>()
-        .into_iter()
         .flatten()
         .collect();
 
@@ -83,10 +88,22 @@ pub fn convert(
 
 // --------------------------------------------------------------- serde types
 
-#[derive(Deserialize, Default)]
-struct ConvertResponse {
+/// A single currency record returned by `v2/currencies`.
+#[derive(Deserialize)]
+struct CurrencyInfo {
     #[serde(default)]
-    timeseries: std::collections::BTreeMap<String, f64>,
+    iso_code: String,
+    #[serde(default)]
+    name: String,
+}
+
+/// A single daily observation returned by `v2/rates` (one entry per date).
+#[derive(Deserialize)]
+struct RateEntry {
+    #[serde(default)]
+    date: String,
+    #[serde(default)]
+    rate: f64,
 }
 
 // --------------------------------------------------------------- helpers

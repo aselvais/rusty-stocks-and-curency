@@ -59,6 +59,11 @@ pub struct App {
     selected_target: String,
     show_add_window: bool,
 
+    /// Asset ids currently overlaid on the comparison chart (multiple colours).
+    compared_ids: Vec<u32>,
+    /// When comparing, plot each series as a percentage of its first value.
+    normalize: bool,
+
     /// Symbols whose history is still being fetched.
     pending: Vec<String>,
 
@@ -125,6 +130,8 @@ impl App {
             selected_base: "EUR".to_string(),
             selected_target: "USD".to_string(),
             show_add_window: false,
+            compared_ids: Vec::new(),
+            normalize: false,
             pending: Vec::new(),
             status: "Ready. Add an asset to get started.".to_string(),
         }
@@ -161,8 +168,17 @@ impl App {
                     yahoo::fetch_history(&client, &symbol, "5y", "1d").map_err(|e| e.to_string())
                 }
                 AssetType::Currency => {
-                    let (base, target) =
-                        currency_pair.unwrap_or_else(|| ("EUR".to_string(), "USD".to_string()));
+                    // When refreshing a stored pair we only have its "BASE/TARGET"
+                    // symbol, so recover the two codes from it when no pair is given.
+                    let (base, target) = match currency_pair {
+                        Some(pair) => pair,
+                        None => {
+                            let mut parts = symbol.split('/');
+                            let b = parts.next().unwrap_or("EUR").to_string();
+                            let t = parts.next().unwrap_or("USD").to_string();
+                            (b, t)
+                        }
+                    };
                     let today = chrono::Utc::now().date_naive();
                     let from = today - chrono::TimeDelta::days(5 * 365);
                     frankfurter::convert(&client, &base, &target, from, today).map_err(|e| e.to_string())
@@ -211,11 +227,19 @@ impl App {
                     match points {
                         Ok(mut points) => {
                             if let Ok(Some(id)) = self.db.asset_id(&symbol) {
+                                let last_date = points.last().map(|p| p.date);
                                 for p in &mut points {
                                     p.asset_id = id;
                                 }
                                 let n = self.db.insert_prices(id, &points).unwrap_or(0);
-                                self.status = format!("Saved {n} point(s) for {symbol}.");
+                                if let Some(d) = last_date {
+                                    let _ = self.db.update_last_updated(id, d);
+                                }
+                                match (last_date, n) {
+                                    (Some(d), _) => self.status = format!("{symbol}: {n} new point(s), latest {d}."),
+                                    (None, 0) => self.status = format!("No data found for {symbol}."),
+                                    (None, _) => self.status = format!("{symbol}: already up to date."),
+                                }
                             } else {
                                 self.status = format!("{symbol}: no matching asset in database.");
                             }
@@ -337,6 +361,11 @@ impl App {
     fn render_watchlist(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Watchlist").heading());
         ui.separator();
+        ui.label(
+            RichText::new("Click a row to view it · tick the box to add it to the comparison.")
+                .small()
+                .weak(),
+        );
 
         if self.assets.is_empty() {
             self.render_onboarding(ui);
@@ -344,23 +373,38 @@ impl App {
         }
 
         let mut clicked_id: Option<u32> = None;
+        let mut compare_toggle: Option<u32> = None;
+        let mut compare_on = false;
         ScrollArea::vertical()
-            .max_height(700.0)
+            .max_height(560.0)
             .show(ui, |ui| {
                 for asset in &self.assets {
-                    let selected = self.selected_asset_id == Some(asset.id);
+                    let id = asset.id;
+                    let selected = self.selected_asset_id == Some(id);
+                    let mut want_compare = self.compared_ids.contains(&id);
                     let mut label = RichText::new(asset.symbol.clone()).strong();
                     if selected {
                         label = label.color(Color32::from_rgb(80, 160, 255));
                     }
-                    let row = ui.horizontal(|ui| {
-                        ui.selectable_label(selected, label);
-                        if let Some(price) = self.db.latest_price(asset.id).ok().flatten() {
+
+                    // The container's own `response` only senses hover, so the click
+                    // must be read off the `selectable_label`'s own response.
+                    ui.horizontal(|ui| {
+                        let checkbox = ui.checkbox(&mut want_compare, "");
+                        if checkbox.changed() {
+                            compare_toggle = Some(id);
+                            compare_on = want_compare;
+                        }
+                        if ui.selectable_label(selected, label).clicked() {
+                            clicked_id = Some(id);
+                        }
+                        if let Some(price) = self.db.latest_price(id).ok().flatten() {
                             ui.label(RichText::new(format!("{:.4}", price.close)).small().weak());
                         }
                     });
-                    if row.response.clicked() {
-                        clicked_id = Some(asset.id);
+
+                    if let Some(updated) = asset.last_updated {
+                        ui.label(RichText::new(format!("updated {updated}")).small().weak());
                     }
                 }
             });
@@ -369,11 +413,23 @@ impl App {
             self.selected_asset_id = Some(id);
             self.refresh_selected();
         }
+        if let Some(id) = compare_toggle {
+            self.compared_ids.retain(|&x| x != id);
+            if compare_on {
+                self.compared_ids.push(id);
+            }
+            self.status = format!("Comparing {} asset(s).", self.compared_ids.len());
+        }
 
         ui.separator();
-        if ui.button("+ Add asset").clicked() {
-            self.show_add_window = true;
-        }
+        ui.horizontal(|ui| {
+            if ui.button("↻ Update all").clicked() {
+                self.refresh_all();
+            }
+            if ui.button("+ Add asset").clicked() {
+                self.show_add_window = true;
+            }
+        });
     }
 
     fn render_onboarding(&mut self, ui: &mut egui::Ui) {
@@ -518,8 +574,22 @@ impl App {
         });
         ui.add_space(6.0);
 
-        // Resolve the selection into an owned `Asset` so we don't hold a `&self`
-        // borrow while calling other `&self` / `&mut self` methods below.
+        // Either a single-asset view or a multi-asset comparison, depending on
+        // which assets the user has ticked in the watchlist.
+        if self.compared_ids.is_empty() {
+            self.render_single_asset(ui);
+        } else {
+            self.render_comparison(ui);
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(RichText::new(self.status.as_str()).small().weak());
+    }
+
+    /// The single-asset view: one coloured line for the currently selected asset,
+    /// with a button to re-download its latest history.
+    fn render_single_asset(&mut self, ui: &mut egui::Ui) {
         let selected_id = self.selected_asset_id;
         let asset = self
             .assets
@@ -528,12 +598,24 @@ impl App {
             .cloned();
         match asset {
             Some(asset) => {
-                ui.label(RichText::new(format!("{} · {}", asset.symbol, asset.name)).heading());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{} · {}", asset.symbol, asset.name)).heading());
+                    if ui.button("↻ Update").clicked() {
+                        let symbol = asset.symbol.clone();
+                        self.status = format!("Updating {symbol}…");
+                        self.spawn_history(symbol, asset.asset_type, None);
+                    }
+                });
                 if let Some(last) = self.db.latest_price(asset.id).ok().flatten() {
                     ui.label(
-                        RichText::new(format!("Latest close: {:.4} {}", last.close, asset.base_currency))
-                            .strong()
-                            .monospace(),
+                        RichText::new(format!(
+                            "Latest close: {:.4} {}  (as of {})",
+                            last.close,
+                            asset.base_currency,
+                            last.date,
+                        ))
+                        .strong()
+                        .monospace(),
                     );
                 }
                 crate::charts::render_line_chart(
@@ -547,10 +629,52 @@ impl App {
                 ui.label(RichText::new("Select an asset to view its history.").weak());
             }
         }
+    }
 
-        ui.add_space(8.0);
-        ui.separator();
-        ui.label(RichText::new(self.status.as_str()).small().weak());
+    /// The comparison view: one coloured line per asset in `compared_ids`, with an
+    /// optional percentage normalization so differently-priced assets share an axis.
+    fn render_comparison(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Comparison").heading());
+            ui.checkbox(&mut self.normalize, "Normalize (%)");
+            if ui.button("Clear").clicked() {
+                self.compared_ids.clear();
+                self.refresh_selected();
+            }
+        });
+
+        let (start, end) = self.range_bounds();
+        let mut overlays: Vec<crate::charts::Overlay> = Vec::new();
+        for (i, &id) in self.compared_ids.iter().enumerate() {
+            let Some(asset) = self.assets.iter().find(|a| a.id == id).cloned() else {
+                continue;
+            };
+            if let Ok(prices) = self.db.get_prices(id, start, end) {
+                overlays.push(crate::charts::Overlay {
+                    name: asset.symbol,
+                    color: crate::charts::palette_color(i),
+                    points: prices,
+                });
+            }
+        }
+
+        if overlays.is_empty() {
+            ui.label(RichText::new("Comparing assets… waiting for data.").weak());
+        } else {
+            crate::charts::render_comparison_chart(ui, &overlays, self.normalize);
+        }
+    }
+
+    /// Re-download history for every asset in the watchlist. Because inserts use
+    /// `INSERT OR IGNORE`, only newly available dates are added.
+    fn refresh_all(&mut self) {
+        let to_refresh: Vec<(String, AssetType)> =
+            self.assets.iter().map(|a| (a.symbol.clone(), a.asset_type)).collect();
+        let count = to_refresh.len();
+        for (symbol, asset_type) in to_refresh {
+            self.spawn_history(symbol, asset_type, None);
+        }
+        self.status = format!("Updating {count} asset(s)…");
     }
 
     fn render_add_window(&mut self, ui: &mut egui::Ui) {
