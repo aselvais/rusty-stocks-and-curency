@@ -33,6 +33,7 @@ mkdir -p "$STAGE"
 cp "target/$TARGET/release/$BIN.exe" "$STAGE/"
 
 ZIP="$DIST/${PRODUCT}-windows-x86_64-${VERSION}.zip"
+ZIP="$(cd "$(dirname "$ZIP")" && pwd)/$(basename "$ZIP")"
 if command -v zip >/dev/null 2>&1; then
   rm -f "$ZIP"
   ( cd "$STAGE" && zip -r "$ZIP" . )

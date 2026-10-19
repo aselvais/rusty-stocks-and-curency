@@ -15,7 +15,7 @@ long_description = "A cross-platform desktop application for tracking stocks and
 # icon = ["icons/icon.png", "icons/icon.ico"]   # add icons and uncomment to embed them
 
 [package.metadata.bundle.osx]
-minimum_version = "11.0"
+minimum_system_version = "11.0"
 
 [dependencies]
 # GUI

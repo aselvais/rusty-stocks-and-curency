@@ -35,7 +35,8 @@ fi
 
 log "Bundling .app and .dmg"
 rm -rf "$BUNDLE_DIR"
-cargo bundle --format osx --format dmg
+cargo bundle --format osx
+cargo bundle --format dmg
 
 find_dmg() { ls "$BUNDLE_DIR/dmg"/*.dmg 2>/dev/null | head -n1 || true; }
 find_app()  { ls -d "$BUNDLE_DIR/osx"/*.app 2>/dev/null | head -n1 || true; }

@@ -36,6 +36,7 @@ cp "target/release/$BIN" "$STAGE/bin/"
 mkdir -p "$DIST"
 
 ZIP="$DIST/${PRODUCT}-linux-${ARCH}-${VERSION}.zip"
+ZIP="$(cd "$(dirname "$ZIP")" && pwd)/$(basename "$ZIP")"
 if command -v zip >/dev/null 2>&1; then
   rm -f "$ZIP"
   ( cd "$STAGE" && zip -r "$ZIP" . )
