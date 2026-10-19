@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to tag (e.g. 1.2.3)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos
+          - os: ubuntu-latest
+            platform: linux
+          - os: windows-latest
+            platform: windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle
+
+      - name: Install system dependencies (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libx11-dev libxrandr-dev libxkbcommon-dev \
+            libwayland-dev libgl1-mesa-dev libasound2-dev \
+            linuxdeploy
+
+      - name: Build + bundle (macOS)
+        if: matrix.platform == 'macos'
+        run: bash ./scripts/release-macos.sh
+
+      - name: Build + bundle (Linux)
+        if: matrix.platform == 'linux'
+        run: bash ./scripts/release-linux.sh
+
+      - name: Build + bundle (Windows)
+        if: matrix.platform == 'windows'
+        shell: powershell
+        run: ./scripts/release-windows.ps1
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
