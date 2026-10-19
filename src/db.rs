@@ -181,6 +181,17 @@ impl Database {
         Ok(out)
     }
 
+    /// Return the most recent (latest by date) price point for an asset, if any.
+    pub fn latest_price(&self, asset_id: u32) -> Result<Option<PricePoint>> {
+        let mut stmt = self.conn.prepare("SELECT id, asset_id, date, open, high, low, close, adj_close, volume FROM prices WHERE asset_id = ?1 ORDER BY date DESC LIMIT 1")?;
+        let rows = stmt.query_map(params![asset_id], map_price)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out.into_iter().next())
+    }
+
     /// Insert price points, ignoring duplicates. Returns the number actually
     /// inserted.
     pub fn insert_prices(&mut self, asset_id: u32, points: &[PricePoint]) -> Result<usize> {
