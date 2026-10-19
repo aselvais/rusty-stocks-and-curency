@@ -9,6 +9,10 @@ multi-asset comparisons (e.g. *GOOGL vs META* or *CAD vs MXN*), and run
 2019-03-14?"). All market data is cached locally in SQLite, so the app keeps
 working offline after the first download.
 
+![screenshot](documentation/Screenshot.png)
+
+
+
 > **Status:** the data layer (network sources, SQLite persistence, shared
 > models) is complete and compiles cleanly with `cargo check`. The
 > interactive UI, charts and converter are still being wired up. This document
